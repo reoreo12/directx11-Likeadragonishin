@@ -7,7 +7,7 @@ C++ DirectX 11 기반 3D 액션 어드벤처 게임 '용과 같이 유신! 극' 
     <img src="Images/Likeadragon_11.jpg" width="45%" alt="용과같이 모작 스크린샷3">
     <img src="Images/Likeadragon_12.jpg" width="45%" alt="용과같이 모작 스크린샷4"><br>
     <img src="Images/Likeadragon_14.jpg" width="45%" alt="용과같이 모작 스크린샷5">
-    <img src="Images/Likeadragon_17.jpg" width="45%" alt="용과같이 모작 스크린샷6"><br>
+    <img src="Images/Likeadragon_0.jpg" width="45%" alt="용과같이 모작 스크린샷6"><br>
     <img src="Images/Likeadragon_30.jpg" width="45%" alt="용과같이 모작 스크린샷7">
     <img src="Images/Likeadragon_31.jpg" width="45%" alt="용과같이 모작 스크린샷8"><br>
     <img src="Images/Likeadragon_33.jpg" width="45%" alt="용과같이 모작 스크린샷9">
