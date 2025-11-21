@@ -1,5 +1,28 @@
+// 셰이더에 필요한 공용 정의문을 모아둔 hlsli 파일을 포함
 #include "Engine_Shader_Defines.hlsli"
 
+// Engine_Shader_Defines.hlsli의 공용 함수
+// 깊이 픽셀을 월드 좌표로 변환
+float3 ReconstructWorldPos(float2 vUV)
+{
+    float4 vDepth = g_DepthTexture.Sample(Point_Clamp_Sampler, vUV);
+    float fDepth = vDepth.x;
+    float fViewZ = vDepth.y * g_vCamRange.y;
+
+    float4 vClip;
+    vClip.x = vUV.x * 2.f - 1.f;
+    vClip.y = vUV.y * -2.f + 1.f;
+    vClip.z = fDepth;
+    vClip.w = 1.f;
+
+    vClip *= fViewZ;
+    float4 vView = mul(vClip, g_ProjMatrixInv);
+    float3 vWorldP = mul(vView, g_ViewMatrixInv).xyz;
+    
+    return vWorldP;
+}
+
+// 변수 선언
 matrix g_WorldMatrix, g_ViewMatrix, g_ProjMatrix;
 matrix g_WorldMatrixInv, g_ViewMatrixInv, g_ProjMatrixInv;
 
@@ -29,7 +52,6 @@ float g_fElapsedTime;
 float g_fStartDelay;
 float g_fLifeTime;
 bool g_bIsLoop;
-bool g_bIsBillBoard;
 
 int g_iUVIndex;
 bool g_bUseAtlas;
@@ -45,32 +67,6 @@ float g_fDistortSpeed;
 float4 g_vCamPosition;
 float2 g_vCamRange;
 
-void ComputeDepthFields(in float4 vProjPos, out float fClipZ, out float fViewW, out float fCamRatio)
-{
-    fClipZ = vProjPos.z / vProjPos.w;
-    fViewW = vProjPos.w;
-    fCamRatio = vProjPos.w / g_vCamRange.y;
-}
-
-float3 ReconstructWorldPos(float2 vUV)
-{
-    float4 d = g_DepthTexture.Sample(Point_Clamp_Sampler, vUV);
-    float fDepth = d.x;
-    float fViewZ = d.y * g_vCamRange.y;
-
-    float4 vClip;
-    vClip.x = vUV.x * 2.f - 1.f;
-    vClip.y = vUV.y * -2.f + 1.f;
-    vClip.z = fDepth;
-    vClip.w = 1.f;
-
-    vClip *= fViewZ;
-    float4 vView = mul(vClip, g_ProjMatrixInv);
-    float3 worldP = mul(vView, g_ViewMatrixInv).xyz;
-    
-    return worldP;
-}
-
 struct VS_IN
 {
     float3 vPosition : POSITION; // [-0.5, 0.5] 로컬 큐브 -> 월드 변환
@@ -84,6 +80,7 @@ struct VS_OUT
     float4 vClipPos : TEXCOORD1; // PS에서 UV 계산용으로 클립 위치 그대로
 };
 
+// Vertex Shader
 VS_OUT VS_MAIN(VS_IN In)
 {
     VS_OUT Out = (VS_OUT) 0;
@@ -118,219 +115,8 @@ struct PS_OUT_WEIGHT
     float4 vReveal : SV_TARGET1;
 };
 
-PS_OUT_WEIGHT PS_DECAL(PS_IN In)
-{
-    PS_OUT_WEIGHT Out;
-    
-    // 화면 UV 복원
-    float2 vScreenUV = In.vClipPos.xy / In.vClipPos.w * float2(0.5f, -0.5f) + 0.5f;
-    // 깊이로부터 월드 위치 재구성
-    float3 vWorldPos = ReconstructWorldPos(vScreenUV);
-    // 데칼 박스 로컬 좌표
-    float4 vLocalPos = mul(float4(vWorldPos, 1.f), g_WorldMatrixInv);
-    // 박스 절반 크기
-    float3 vHalfSize = g_vBoxSize * 0.5f;
-
-    // 박스 범위 밖이면 버림
-    if (any(abs(vLocalPos.xyz) > vHalfSize))
-        discard;
-
-    // 씬 픽셀 노말 가져와서 가중치 계산
-    float3 vNormal = normalize(g_NormalTexture.Sample(Point_Clamp_Sampler, vScreenUV).rgb * 2.0f - 1.0f);
-    float3 vAbs = abs(vNormal);
-    float fInvSum = 1.f / (vAbs.x + vAbs.y + vAbs.z + 1e-6f);
-    float3 vWeight = vAbs * fInvSum;
-    
-    // 각 축별 UV 계산(세로 뒤집기)
-    float2 UVAxis[3];
-    UVAxis[0] = float2((vLocalPos.z + vHalfSize.z) / g_vBoxSize.z,
-                        1.f - ((vLocalPos.y + vHalfSize.y) / g_vBoxSize.y));
-    UVAxis[1] = float2((vLocalPos.x + vHalfSize.x) / g_vBoxSize.x,
-                        1.f - ((vLocalPos.z + vHalfSize.z) / g_vBoxSize.z));
-    UVAxis[2] = float2((vLocalPos.x + vHalfSize.x) / g_vBoxSize.x,
-                        1.f - ((vLocalPos.y + vHalfSize.y) / g_vBoxSize.y));
-
-    // 가장 가중치 큰 축 인덱스 선정
-    int iAxis = 0;
-    if (vWeight.y > vWeight.x && vWeight.y > vWeight.z)
-        iAxis = 1;
-    else if (vWeight.z > vWeight.x && vWeight.z > vWeight.y)
-        iAxis = 2;
-
-    // 최종 UV
-    float2 vFinalUV = UVAxis[iAxis];
-    
-    // 아틀라스 적용
-    if (g_bUseAtlas)
-    {
-        int iTotalFrames = g_iNumUVCols * g_iNumUVRows;
-        if (iTotalFrames > 0)
-        {
-            float fRatio = saturate(g_fElapsedTime / g_fLifeTime);
-            int iIdx = min(int(fRatio * iTotalFrames), iTotalFrames - 1);
-
-            int iU = iIdx % g_iNumUVCols;
-            int iV = iIdx / g_iNumUVCols;
-
-            float2 vScale = 1.f / float2(g_iNumUVCols, g_iNumUVRows);
-            float2 vOffset = float2(iU, iV) * vScale;
-
-            // 축별 UV에 적용
-            [unroll]
-            for (int i = 0; i < 3; ++i)
-                UVAxis[i] = vOffset + UVAxis[i] * vScale;
-        }
-    }
-    
-    // 샘플링
-    float4 vColorX = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-    float4 vColorY = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-    float4 vColorZ = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-
-    float4 vColor;
-    
-    // 최대 가중치 축만 선택
-    if (vWeight.x > vWeight.y && vWeight.x > vWeight.z)
-        vColor = vColorX;
-    else if (vWeight.y > vWeight.x && vWeight.y > vWeight.z)
-        vColor = vColorY;
-    else
-        vColor = vColorZ;
-    
-    vColor.rgb *= g_vColor.rgb;
-    vColor.a *= g_vColor.a;
-    
-    float fLifeRatio = saturate(g_fElapsedTime / g_fLifeTime);
-
-    float fadeAlpha = saturate(1.f - fLifeRatio);
-    vColor.a *= fadeAlpha;      
-
-    float fThreshold = saturate(fLifeRatio);
-    float fNoise = g_DissolveTexture.Sample(Point_Clamp_Sampler, vFinalUV).r;
-    if (fNoise < fThreshold)
-        discard;
-    
-    Out.vAccum = float4(vColor.rgb * vColor.a, vColor.a);
-    Out.vReveal = vColor.a;
-    
-    return Out;
-}
-
-PS_OUT_WEIGHT PS_DECAL_BLOOD(PS_IN In)
-{
-    PS_OUT_WEIGHT Out;
-    
-    // 화면 UV 복원
-    float2 vScreenUV = In.vClipPos.xy / In.vClipPos.w * float2(0.5f, -0.5f) + 0.5f;
-    // 깊이로부터 월드 위치 재구성
-    float3 vWorldPos = ReconstructWorldPos(vScreenUV);
-    // 데칼 박스 로컬 좌표
-    float4 vLocalPos = mul(float4(vWorldPos, 1.f), g_WorldMatrixInv);
-    // 박스 절반 크기
-    float3 vHalfSize = g_vBoxSize * 0.5f;
-
-    // 박스 범위 밖이면 버림
-    if (any(abs(vLocalPos.xyz) > vHalfSize))
-        discard;
-
-    // 씬 픽셀 노말 가져와서 가중치 계산
-    float3 vNormal = normalize(g_NormalTexture.Sample(Point_Clamp_Sampler, vScreenUV).rgb * 2.0f - 1.0f);
-    float3 vAbs = abs(vNormal);
-    float fInvSum = 1.f / (vAbs.x + vAbs.y + vAbs.z + 1e-6f);
-    float3 vWeight = vAbs * fInvSum;
-    
-    // 각 축별 UV 계산(세로 뒤집기)
-    float2 UVAxis[3];
-    UVAxis[0] = float2((vLocalPos.z + vHalfSize.z) / g_vBoxSize.z,
-                        1.f - ((vLocalPos.y + vHalfSize.y) / g_vBoxSize.y));
-    UVAxis[1] = float2((vLocalPos.x + vHalfSize.x) / g_vBoxSize.x,
-                        1.f - ((vLocalPos.z + vHalfSize.z) / g_vBoxSize.z));
-    UVAxis[2] = float2((vLocalPos.x + vHalfSize.x) / g_vBoxSize.x,
-                        1.f - ((vLocalPos.y + vHalfSize.y) / g_vBoxSize.y));
-
-    // 가장 가중치 큰 축 인덱스 선정
-    int iAxis = 0;
-    if (vWeight.y > vWeight.x && vWeight.y > vWeight.z)
-        iAxis = 1;
-    else if (vWeight.z > vWeight.x && vWeight.z > vWeight.y)
-        iAxis = 2;
-
-    // 최종 UV
-    float2 vFinalUV = UVAxis[iAxis];
-    
-    // 아틀라스 적용
-    if (g_bUseAtlas)
-    {
-        int iTotalFrames = g_iNumUVCols * g_iNumUVRows;
-        if (iTotalFrames > 0)
-        {
-            float fRatio = saturate(g_fElapsedTime / g_fLifeTime);
-            int iIdx = min(int(fRatio * iTotalFrames), iTotalFrames - 1);
-
-            int iU = iIdx % g_iNumUVCols;
-            int iV = iIdx / g_iNumUVCols;
-
-            float2 vScale = 1.f / float2(g_iNumUVCols, g_iNumUVRows);
-            float2 vOffset = float2(iU, iV) * vScale;
-
-            // 축별 UV에 적용
-            [unroll]
-            for (int i = 0; i < 3; ++i)
-                UVAxis[i] = vOffset + UVAxis[i] * vScale;
-        }
-    }
-    
-    // 샘플링
-    float4 vColorX = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-    float4 vColorY = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-    float4 vColorZ = g_DiffuseTexture.Sample(Linear_Clamp_Sampler, UVAxis[iAxis]);
-
-    float4 vColor;
-    
-    // 최대 가중치 축만 선택
-    if (vWeight.x > vWeight.y && vWeight.x > vWeight.z)
-        vColor = vColorX;
-    else if (vWeight.y > vWeight.x && vWeight.y > vWeight.z)
-        vColor = vColorY;
-    else
-        vColor = vColorZ;
-    
-    vColor *= g_vColor;
-    
-    float fTotal = g_fLifeTime;
-    float fElapsed = g_fElapsedTime;
-    float fLifeRatio = saturate(fElapsed / fTotal);
-    
-    if (fLifeRatio < 0.02f)
-        discard;
-
-    float fFade;
-    if (fLifeRatio < 0.09f)
-    {
-        fFade = saturate((fLifeRatio - 0.02f) / 0.07f);
-    }
-    else if (fLifeRatio < 0.3f)
-    {
-        fFade = 1.f;
-    }
-    else
-    {
-        fFade = saturate((1.f - fLifeRatio) / 0.7f);
-    }
-    
-    vColor.a *= fFade;
-
-    float fThreshold = saturate(fLifeRatio);
-    float fNoise = g_DissolveTexture.Sample(Point_Clamp_Sampler, vFinalUV).r;
-    if (fNoise < fThreshold)
-        discard;
-    
-    Out.vAccum = float4(vColor.rgb * vColor.a, vColor.a);
-    Out.vReveal = vColor.a;
-    
-    return Out;
-}
-
+// Pixel Shader
+// 데칼 셰이더 中 자상 데칼 셰이더
 PS_OUT_WEIGHT PS_DECAL_SLASH(PS_IN In)
 {
     PS_OUT_WEIGHT Out;
@@ -397,8 +183,8 @@ PS_OUT_WEIGHT PS_DECAL_SLASH(PS_IN In)
     
     float fLifeRatio = saturate(g_fElapsedTime / g_fLifeTime);
 
-    float fadeAlpha = saturate(1.f - fLifeRatio);
-    vColor.a *= fadeAlpha;
+    float fFadeAlpha = saturate(1.f - fLifeRatio);
+    vColor.a *= fFadeAlpha;
     
     Out.vAccum = float4(vColor.rgb * vColor.a, vColor.a);
     Out.vReveal = vColor.a;
@@ -406,31 +192,11 @@ PS_OUT_WEIGHT PS_DECAL_SLASH(PS_IN In)
     return Out;
 }
 
+// ...
+
 technique11 DefaultTechnique
 {
-    pass WeightDecal // 0
-    {
-        SetRasterizerState(RS_Cull_None);
-        SetDepthStencilState(DSS_NonWriteZ, 0);
-        SetBlendState(BS_Weight, float4(0.f, 0.f, 0.f, 0.f), 0xffffffff);
-    
-        VertexShader = compile vs_5_0 VS_MAIN();
-        GeometryShader = NULL;
-        PixelShader = compile ps_5_0 PS_DECAL();
-    }
-
-    pass DecalBlood // 1
-    {
-        SetRasterizerState(RS_Cull_None);
-        SetDepthStencilState(DSS_NonWriteZ, 0);
-        SetBlendState(BS_Weight, float4(0.f, 0.f, 0.f, 0.f), 0xffffffff);
-    
-        VertexShader = compile vs_5_0 VS_MAIN();
-        GeometryShader = NULL;
-        PixelShader = compile ps_5_0 PS_DECAL_BLOOD();
-    }
-
-    pass DecalSlash // 2
+    pass DecalSlash
     {
         SetRasterizerState(RS_Cull_None);
         SetDepthStencilState(DSS_NonWriteZ, 0);
@@ -440,4 +206,6 @@ technique11 DefaultTechnique
         GeometryShader = NULL;
         PixelShader = compile ps_5_0 PS_DECAL_SLASH();
     }
+
+    // ...
 }
